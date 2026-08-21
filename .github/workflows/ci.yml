@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# CI compiles only. There are deliberately no live network calls here: the
+# poller's correctness against real chain data is verified with `npm run scan`
+# against Testnet by hand, and a CI job that depended on a public RPC and a
+# Telegram token would fail for reasons that have nothing to do with the commit.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
