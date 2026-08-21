@@ -1,0 +1,433 @@
+/**
+ * Decode Mimir contract events into typed objects.
+ *
+ * ── Wire shape ───────────────────────────────────────────────────────────────
+ *
+ * Soroban's `#[contractevent]` macro lays an event out as:
+ *
+ *   topic[0]   the event name in snake_case ("claim_created", "market_settled")
+ *   topic[1..] the `#[topic]`-annotated fields, in DECLARATION ORDER
+ *   value      a MAP of the remaining (non-topic) fields, keyed by snake_case name
+ *
+ * So `ClaimChallenged { #[topic] id, #[topic] challenger, stake }` arrives as
+ *   topics: "claim_challenged" | <u64 id> | <G… challenger>   value: { stake }
+ *
+ * Every field name below is taken from the deployed contracts' event
+ * definitions (`contracts-soroban/mimir-market/src/events.rs` and
+ * `contracts-soroban/mimir-squad/src/events.rs`), not inferred.
+ *
+ * ── Amounts ──────────────────────────────────────────────────────────────────
+ *
+ * All money is atomic USDC in `i128`. Stellar's USDC Stellar Asset Contract has
+ * **7 decimals**, not the 6 of the ERC-20. Amounts stay `bigint` through
+ * decoding and are only converted for display, at the formatting edge.
+ */
+
+import { scValToNative, type rpc, type xdr } from "@stellar/stellar-sdk";
+
+/** Which of the two Mimir contracts an event came from. */
+export type ContractSource = "market" | "squad";
+
+/** 1 USDC in atomic units. */
+export const USDC_UNIT = 10_000_000n;
+
+/** `WinnerSide` in `mimir-market/src/types.rs`. Unit enums decode to their u32. */
+export const WINNER_SIDE: Record<number, string> = {
+  0: "unresolved",
+  1: "creator",
+  2: "challengers",
+  3: "draw",
+  4: "unresolvable",
+};
+
+/** `SIDE_A` / `SIDE_B` / `RESULT_CANCELLED` in `mimir-squad/src/types.rs`. */
+export const SQUAD_SIDE: Record<number, string> = {
+  0: "pending",
+  1: "Side A",
+  2: "Side B",
+  3: "cancelled",
+};
+
+export interface EventMeta {
+  source: ContractSource;
+  contractId: string;
+  ledger: number;
+  txHash: string;
+  /** Ledger close time, unix seconds. */
+  at: number;
+  /** The RPC's own event id — unique and monotonic, handy for logs. */
+  eventId: string;
+}
+
+export type MarketPayload =
+  | { name: "claim_created"; claimId: number; creator: string; category: string }
+  | { name: "claim_challenged"; claimId: number; challenger: string; stake: bigint }
+  | {
+      name: "claim_resolved";
+      claimId: number;
+      winnerSide: number;
+      summary: string;
+      confidence: number;
+      evidenceHash: string;
+    }
+  | { name: "claim_cancelled"; claimId: number }
+  | {
+      name: "market_settled";
+      claimId: number;
+      totalPaid: bigint;
+      totalFees: bigint;
+      owedToChallengers: bigint;
+      dust: bigint;
+    }
+  | {
+      name: "challenger_paid";
+      claimId: number;
+      challenger: string;
+      stake: bigint;
+      gross: bigint;
+      fee: bigint;
+      net: bigint;
+    }
+  | { name: "fee_claimed"; recipient: string; amount: bigint }
+  | { name: "withdrawal"; to: string; amount: bigint }
+  | { name: "withdrawal_pending"; to: string; amount: bigint };
+
+export type SquadPayload =
+  | {
+      name: "market_created";
+      marketId: number;
+      captain: string;
+      deadline: number;
+      feeBps: number;
+      question: string;
+    }
+  | {
+      name: "deposited";
+      marketId: number;
+      side: number;
+      participant: string;
+      amount: bigint;
+      shares: bigint;
+    }
+  | { name: "withdrawn"; marketId: number; side: number; participant: string; amount: bigint }
+  | { name: "resolved"; marketId: number; result: number; poolA: bigint; poolB: bigint }
+  | { name: "claimed"; marketId: number; participant: string; gross: bigint; fee: bigint; net: bigint }
+  | { name: "fees_claimed"; recipient: string; amount: bigint };
+
+/**
+ * Anything this bot has no notification for: admin events (`oracle_changed`,
+ * the `fee_policy_*` family), or a shape it failed to decode. Kept rather than
+ * dropped so the poller can log what it skipped instead of going quiet.
+ */
+export interface UnknownPayload {
+  name: "unknown";
+  eventName: string;
+  reason?: string;
+}
+
+export type EventPayload = MarketPayload | SquadPayload | UnknownPayload;
+
+export type DecodedEvent = EventMeta & { payload: EventPayload };
+
+// ── Scalar helpers ───────────────────────────────────────────────────────────
+
+class DecodeError extends Error {}
+
+function native(value: xdr.ScVal): unknown {
+  return scValToNative(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function big(value: unknown, what: string): bigint {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isInteger(value)) return BigInt(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  throw new DecodeError(`${what}: expected an integer, got ${typeof value}`);
+}
+
+/** For ids, deadlines and bps — small enough that `number` is honest. */
+function num(value: unknown, what: string): number {
+  const asBig = big(value, what);
+  if (asBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new DecodeError(`${what}: ${asBig} exceeds the safe integer range`);
+  }
+  return Number(asBig);
+}
+
+function str(value: unknown, what: string): string {
+  if (typeof value === "string") return value;
+  // A contract `String` normally decodes to a JS string, but bytes-shaped
+  // payloads show up as Buffer on some SDK paths.
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+  throw new DecodeError(`${what}: expected a string, got ${typeof value}`);
+}
+
+/** An `Address` decodes to its `G…`/`C…` strkey. */
+function addr(value: unknown, what: string): string {
+  const s = str(value, what);
+  if (!/^[GC][A-Z2-7]{55}$/.test(s)) {
+    throw new DecodeError(`${what}: expected a Stellar address strkey, got "${s}"`);
+  }
+  return s;
+}
+
+function hex(value: unknown, what: string): string {
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("hex");
+  if (typeof value === "string") return value;
+  throw new DecodeError(`${what}: expected bytes, got ${typeof value}`);
+}
+
+function topicAt(topics: unknown[], index: number, what: string): unknown {
+  if (index >= topics.length) {
+    throw new DecodeError(`${what}: missing topic[${index}] (event has ${topics.length} topics)`);
+  }
+  return topics[index];
+}
+
+// ── Per-contract decoders ────────────────────────────────────────────────────
+
+function decodeMarket(
+  name: string,
+  topics: unknown[],
+  fields: Record<string, unknown>,
+): MarketPayload | null {
+  switch (name) {
+    case "claim_created":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "claim_created.id"), "claim_created.id"),
+        creator: addr(topicAt(topics, 2, "claim_created.creator"), "claim_created.creator"),
+        category: str(fields.category, "claim_created.category"),
+      };
+
+    case "claim_challenged":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "claim_challenged.id"), "claim_challenged.id"),
+        challenger: addr(
+          topicAt(topics, 2, "claim_challenged.challenger"),
+          "claim_challenged.challenger",
+        ),
+        stake: big(fields.stake, "claim_challenged.stake"),
+      };
+
+    case "claim_resolved":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "claim_resolved.id"), "claim_resolved.id"),
+        winnerSide: num(fields.winner_side, "claim_resolved.winner_side"),
+        summary: str(fields.summary, "claim_resolved.summary"),
+        confidence: num(fields.confidence, "claim_resolved.confidence"),
+        evidenceHash: hex(fields.evidence_hash, "claim_resolved.evidence_hash"),
+      };
+
+    case "claim_cancelled":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "claim_cancelled.id"), "claim_cancelled.id"),
+      };
+
+    case "market_settled":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "market_settled.id"), "market_settled.id"),
+        totalPaid: big(fields.total_paid, "market_settled.total_paid"),
+        totalFees: big(fields.total_fees, "market_settled.total_fees"),
+        owedToChallengers: big(fields.owed_to_challengers, "market_settled.owed_to_challengers"),
+        dust: big(fields.dust, "market_settled.dust"),
+      };
+
+    case "challenger_paid":
+      return {
+        name,
+        claimId: num(topicAt(topics, 1, "challenger_paid.id"), "challenger_paid.id"),
+        challenger: addr(
+          topicAt(topics, 2, "challenger_paid.challenger"),
+          "challenger_paid.challenger",
+        ),
+        stake: big(fields.stake, "challenger_paid.stake"),
+        gross: big(fields.gross, "challenger_paid.gross"),
+        fee: big(fields.fee, "challenger_paid.fee"),
+        net: big(fields.net, "challenger_paid.net"),
+      };
+
+    case "fee_claimed":
+      return {
+        name,
+        recipient: addr(topicAt(topics, 1, "fee_claimed.recipient"), "fee_claimed.recipient"),
+        amount: big(fields.amount, "fee_claimed.amount"),
+      };
+
+    case "withdrawal":
+    case "withdrawal_pending":
+      return {
+        name,
+        to: addr(topicAt(topics, 1, `${name}.to`), `${name}.to`),
+        amount: big(fields.amount, `${name}.amount`),
+      };
+
+    default:
+      // `oracle_changed`, `ownership_transferred`, `agent_attributed`,
+      // `fee_accrued`, `fee_policy_*` — real events with no notification.
+      return null;
+  }
+}
+
+function decodeSquad(
+  name: string,
+  topics: unknown[],
+  fields: Record<string, unknown>,
+): SquadPayload | null {
+  switch (name) {
+    case "market_created":
+      return {
+        name,
+        marketId: num(topicAt(topics, 1, "market_created.market_id"), "market_created.market_id"),
+        captain: addr(topicAt(topics, 2, "market_created.captain"), "market_created.captain"),
+        deadline: num(fields.deadline, "market_created.deadline"),
+        feeBps: num(fields.fee_bps, "market_created.fee_bps"),
+        question: str(fields.question, "market_created.question"),
+      };
+
+    case "deposited":
+      return {
+        name,
+        marketId: num(topicAt(topics, 1, "deposited.market_id"), "deposited.market_id"),
+        side: num(topicAt(topics, 2, "deposited.side"), "deposited.side"),
+        participant: addr(topicAt(topics, 3, "deposited.participant"), "deposited.participant"),
+        amount: big(fields.amount, "deposited.amount"),
+        shares: big(fields.shares, "deposited.shares"),
+      };
+
+    case "withdrawn":
+      return {
+        name,
+        marketId: num(topicAt(topics, 1, "withdrawn.market_id"), "withdrawn.market_id"),
+        side: num(topicAt(topics, 2, "withdrawn.side"), "withdrawn.side"),
+        participant: addr(topicAt(topics, 3, "withdrawn.participant"), "withdrawn.participant"),
+        amount: big(fields.amount, "withdrawn.amount"),
+      };
+
+    case "resolved":
+      return {
+        name,
+        marketId: num(topicAt(topics, 1, "resolved.market_id"), "resolved.market_id"),
+        result: num(fields.result, "resolved.result"),
+        poolA: big(fields.pool_a, "resolved.pool_a"),
+        poolB: big(fields.pool_b, "resolved.pool_b"),
+      };
+
+    case "claimed":
+      return {
+        name,
+        marketId: num(topicAt(topics, 1, "claimed.market_id"), "claimed.market_id"),
+        participant: addr(topicAt(topics, 2, "claimed.participant"), "claimed.participant"),
+        gross: big(fields.gross, "claimed.gross"),
+        fee: big(fields.fee, "claimed.fee"),
+        net: big(fields.net, "claimed.net"),
+      };
+
+    case "fees_claimed":
+      return {
+        name,
+        recipient: addr(topicAt(topics, 1, "fees_claimed.recipient"), "fees_claimed.recipient"),
+        amount: big(fields.amount, "fees_claimed.amount"),
+      };
+
+    default:
+      return null;
+  }
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+/** `event.contractId` is a `Contract` on some SDK paths and a string on others. */
+function contractIdOf(event: rpc.Api.EventResponse): string {
+  const raw: unknown = (event as { contractId?: unknown }).contractId;
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object") {
+    const maybe = raw as { contractId?: () => string; toString?: () => string };
+    if (typeof maybe.contractId === "function") return maybe.contractId();
+    if (typeof maybe.toString === "function") return maybe.toString();
+  }
+  return "";
+}
+
+/**
+ * Decode one RPC event.
+ *
+ * Never throws: an event this bot does not understand — a new contract event, a
+ * shape change, a field it cannot read — becomes an `unknown` payload with the
+ * reason attached. A notifier must not die on an event it was not taught.
+ */
+export function decodeEvent(source: ContractSource, event: rpc.Api.EventResponse): DecodedEvent {
+  const meta: EventMeta = {
+    source,
+    contractId: contractIdOf(event),
+    ledger: Number(event.ledger ?? 0),
+    txHash: event.txHash ?? "",
+    at: Math.floor(new Date(event.ledgerClosedAt ?? 0).getTime() / 1000),
+    eventId: event.id ?? "",
+  };
+
+  let eventName = "";
+  try {
+    const topics = (event.topic ?? []).map((t) => {
+      try {
+        return native(t);
+      } catch {
+        return null;
+      }
+    });
+
+    const first = topics[0];
+    eventName = typeof first === "string" ? first : "";
+
+    const decodedValue = native(event.value);
+    const fields = isRecord(decodedValue) ? decodedValue : {};
+
+    const payload =
+      source === "market"
+        ? decodeMarket(eventName, topics, fields)
+        : decodeSquad(eventName, topics, fields);
+
+    if (payload) return { ...meta, payload };
+    return { ...meta, payload: { name: "unknown", eventName, reason: "no decoder" } };
+  } catch (err) {
+    return {
+      ...meta,
+      payload: {
+        name: "unknown",
+        eventName,
+        reason: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+}
+
+// ── Display helpers (shared by formatting and the CLI) ───────────────────────
+
+/** Atomic USDC -> a trimmed decimal string. `20000000n` -> `"2"`. */
+export function formatUsdc(units: bigint): string {
+  const negative = units < 0n;
+  const abs = negative ? -units : units;
+  const whole = abs / USDC_UNIT;
+  const frac = (abs % USDC_UNIT).toString().padStart(7, "0").replace(/0+$/, "");
+  return `${negative ? "-" : ""}${whole}${frac ? `.${frac}` : ""}`;
+}
+
+/** `GABCD…WXYZ` — full strkeys are unreadable in a chat message. */
+export function shortAddress(address: string): string {
+  return address.length <= 12 ? address : `${address.slice(0, 5)}…${address.slice(-4)}`;
+}
+
+export function winnerSideLabel(side: number): string {
+  return WINNER_SIDE[side] ?? `side ${side}`;
+}
+
+export function squadSideLabel(side: number): string {
+  return SQUAD_SIDE[side] ?? `side ${side}`;
+}
