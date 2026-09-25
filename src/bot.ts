@@ -39,9 +39,9 @@ const TELEGRAM_OPTIONS = {
   link_preview_options: { is_disabled: true },
 };
 
-function ago(timestamp: number | null): string {
+function ago(timestamp: number | null, nowMs: number = Date.now()): string {
   if (timestamp === null) return "never";
-  const seconds = Math.round((Date.now() - timestamp) / 1000);
+  const seconds = Math.max(0, Math.round((nowMs - timestamp) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   return `${Math.round(seconds / 3600)}h ago`;
@@ -59,7 +59,7 @@ function statusMessage(config: BotConfig, status: PollerStatus): string {
     "",
     `Chain tip: ${status.latestLedger ?? "unknown"}`,
     `RPC retains from ledger: ${status.oldestLedger ?? "unknown"}`,
-    `Poll interval: ${Math.round(config.pollIntervalMs / 1000)}s · last poll ${ago(status.lastPollAt)}`,
+    `Poll interval: ${Math.round(config.pollIntervalMs / 1000)}s · last poll ${ago(status.lastPollAt, nowMs)}`,
     `Cycles: ${status.cycles} · sent ${status.notificationsSent} · failed sends ${status.notificationsFailed} · skipped ${status.eventsSkipped}`,
     "",
     "*Watching*",
@@ -77,7 +77,7 @@ function statusMessage(config: BotConfig, status: PollerStatus): string {
   if (status.lastError) {
     lines.push(
       "",
-      `Last error \\(${ago(status.lastError.at)}\\): ${escapeMd(status.lastError.message)}`,
+      `Last error \\(${ago(status.lastError.at, nowMs)}\\): ${escapeMd(status.lastError.message)}`,
     );
   }
   if (status.consecutiveFailures > 0) {
@@ -231,3 +231,4 @@ export async function registerCommands(bot: Bot): Promise<void> {
     console.warn(`[bot] setMyCommands failed: ${safeErrorMessage(err)}`);
   }
 }
+
