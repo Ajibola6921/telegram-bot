@@ -346,6 +346,10 @@ export async function readContractEvents(
   target: WatchTarget,
   opts: ScanOptions = {},
 ): Promise<ContractScan> {
+  // Validate contract ID at scan time so misconfigurations surface early
+  // with an actionable error tied to the specific target.
+  validateContractId(target.contractId, `${target.source} contract ID`);
+
   const scan = await paginatedGetEvents(
     server,
     [{ type: "contract", contractIds: [target.contractId] }],
