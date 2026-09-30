@@ -824,6 +824,8 @@ const CONFIG_KEYS: readonly ConfigKeySpec[] = [
   { key: "SHUTDOWN_TIMEOUT_MS", secret: false, hasBuiltInDefault: true },
   { key: "TELEGRAM_SEND_TIMEOUT_MS", secret: false, hasBuiltInDefault: true },
   { key: "CHANNEL_PREVIEW_MODE", secret: false, hasBuiltInDefault: true },
+  { key: "LINK_PREVIEW_MARKET", secret: false, hasBuiltInDefault: true },
+  { key: "LINK_PREVIEW_SQUAD", secret: false, hasBuiltInDefault: true },
   // Injected by a platform, never set by an operator: read only as the
   // HEALTH_PORT fallback, so it is reported for the same reason.
   { key: "PORT", secret: false },
