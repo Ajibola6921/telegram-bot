@@ -976,6 +976,47 @@ async function sendWithRetry(
   }
 }
 
+export function buildDigests(
+  events: DecodedEvent[],
+  config: BotConfig,
+  formatFn: (config: BotConfig, event: DecodedEvent) => string | null,
+): { text: string; count: number; skipped: number }[] {
+  const digests: { text: string; count: number; skipped: number }[] = [];
+  let currentText = "";
+  let currentCount = 0;
+  let currentSkipped = 0;
+
+  for (const event of events) {
+    if (event.payload.name === "unknown") {
+      currentSkipped += 1;
+      continue;
+    }
+
+    const text = formatFn(config, event);
+    if (text === null) {
+      currentSkipped += 1;
+      continue;
+    }
+
+    const separator = currentText ? "\n\n" : "";
+    if (currentText.length + separator.length + text.length > 4000) {
+      digests.push({ text: currentText, count: currentCount, skipped: currentSkipped });
+      currentText = text;
+      currentCount = 1;
+      currentSkipped = 0;
+    } else {
+      currentText += separator + text;
+      currentCount += 1;
+    }
+  }
+
+  if (currentText || currentSkipped > 0) {
+    digests.push({ text: currentText, count: currentCount, skipped: currentSkipped });
+  }
+
+  return digests;
+}
+
 export function createPoller(deps: PollerDeps) {
   const { config, server, send } = deps;
   const metrics = deps.metrics;
