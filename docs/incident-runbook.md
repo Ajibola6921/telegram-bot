@@ -426,6 +426,7 @@ Before deployment:
 * `data/` or `CURSOR_FILE` is persistent — on Railway, a volume attached at `/app/data` (see `railway.json`).
 * The deployed revision passes typecheck and build checks.
 * No production credentials are committed.
+* Confirm the expected version appears in `GET /health` (`"version"` field) and in the `[boot]` log line after startup.
 
 After deployment:
 

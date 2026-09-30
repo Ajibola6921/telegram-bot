@@ -30,6 +30,7 @@
  * value the machine provided from one the file provided.
  */
 
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import { config as loadDotenv, type DotenvConfigOptions } from "dotenv";
@@ -110,6 +111,27 @@ function loadEnvFile(): EnvFileState {
   }
 }
 
+/**
+ * Package version read once at startup from `package.json`. Surfaced in the
+ * health report, `/status`, boot logs, and log exports so operators can
+ * confirm which release is running without a shell session on the host.
+ *
+ * Falls back to `"unknown"` when the field is absent or the file cannot be
+ * loaded (e.g. a custom build that strips the manifest).
+ */
+export const APP_VERSION: string = (() => {
+  try {
+    // createRequire is the idiomatic way to load JSON in ESM without enabling
+    // resolveJsonModule (which would require declaration file emission).
+    const req = createRequire(import.meta.url);
+    const pkg = req("../package.json") as { version?: unknown };
+    const v = pkg.version;
+    return typeof v === "string" && v.length > 0 ? v : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
 export interface StellarConfig {
   /** Named network, derived from STELLAR_NETWORK or inferred from the passphrase. */
   network?: StellarNetwork;
@@ -130,6 +152,8 @@ export interface TelegramRoute {
 }
 
 export interface BotConfig extends StellarConfig {
+  /** Semver string from `package.json`, or `"unknown"` if unavailable. */
+  version: string;
   botToken: string;
   chatId: string;
   /** Optional per-contract destinations; absent values use `chatId`. */
@@ -603,6 +627,7 @@ export function loadConfig(): BotConfig {
 
   const config: BotConfig = {
     ...stellar,
+    version: APP_VERSION,
     botToken: c.required("BOT_TOKEN"),
     chatId: c.chatId("TELEGRAM_CHAT_ID"),
     marketChatId: c.optionalChatId("TELEGRAM_MARKET_CHAT_ID", c.get("TELEGRAM_CHAT_ID") ?? ""),

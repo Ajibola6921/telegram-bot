@@ -19,6 +19,9 @@ npm test
 Node's built-in test runner (the same path CI uses). To run only the local-mock
 suites: `npm run test:mock`.
 
+CI runs typecheck, build, and the full test suite on every push and pull request.
+No live Testnet RPC access, Telegram credentials, or signing keys are required.
+
 Live Testnet scanning is **manual and separate**:
 
 ```bash
