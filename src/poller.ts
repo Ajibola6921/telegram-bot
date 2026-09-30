@@ -97,6 +97,24 @@ export interface TargetState {
   rewindFromLedger: number | null;
   /** RPC has rejected this target's cursor as stale; clears after a successful scan. */
   cursorStale: boolean;
+  /**
+   * Ledgers whose events were lost when a stale cursor was rewound to the
+   * retained floor. `0` until a restart gap is detected for this target.
+   */
+  gapLedgers: number;
+  /**
+   * When this target's stale cursor was last rewound to the floor, or `null`
+   * if that has never happened for this target.
+   */
+  cursorResetAt: number | null;
+  /**
+   * A cursor is persisted but no ledger can be read out of it. The position
+   * is left untouched — the RPC's token is opaque by design, so failing to
+   * read a ledger from it here is not evidence the RPC will reject it — and
+   * it is surfaced so "cannot be placed" and "inside the window" never
+   * look alike.
+   */
+  cursorUnreadable: boolean;
   lastError: string | null;
   /**
    * Consecutive successful cycles in which this target's cursor did not move
@@ -110,6 +128,22 @@ export interface TargetState {
   consecutiveFailures: number;
   /** Timestamp (unix ms) before which this target will skip RPC scanning. */
   nextEligibleAt: number | null;
+}
+
+/**
+ * A resume position that fell out of the RPC's retained window: the events
+ * between the cursor and the retained floor are gone for good.
+ */
+export interface RestartGap {
+  /** When the gap was detected. */
+  at: number;
+  source: ContractSource;
+  /** Ledger the persisted cursor pointed at. */
+  cursorLedger: number;
+  /** The RPC's retained floor at detection time. */
+  oldestLedger: number;
+  /** Ledgers whose events are unrecoverable (`oldestLedger - cursorLedger`). */
+  missedLedgers: number;
 }
 
 export type PollerPauseResult = "paused" | "already-paused" | "stopped";
@@ -155,6 +189,10 @@ export interface PollerStatus {
   eventsDeduplicated: number;
   /** Cursors automatically rewound to the RPC's retained floor this run. */
   cursorRewinds: number;
+  /** Restart gaps detected this run: one per cursor found below the floor. */
+  restartGaps: number;
+  /** Details of the most recent restart gap, or `null` when none was seen. */
+  lastRestartGap: RestartGap | null;
   consecutiveFailures: number;
   lastError: { at: number; message: string } | null;
   /**
@@ -1061,6 +1099,9 @@ export function createPoller(deps: PollerDeps) {
         lastEventLedger: null,
         rewindFromLedger: null,
         cursorStale: false,
+        gapLedgers: 0,
+        cursorResetAt: null,
+        cursorUnreadable: false,
         lastError: null,
         cyclesWithoutAdvance: 0,
         cursorStalled: false,
@@ -1102,6 +1143,8 @@ export function createPoller(deps: PollerDeps) {
     notificationsDropped: 0,
     eventsDeduplicated: 0,
     cursorRewinds: 0,
+    restartGaps: 0,
+    lastRestartGap: null,
     consecutiveFailures: 0,
     lastError: null,
     ledgerCache: { hits: 0, misses: 0 },
@@ -1670,7 +1713,10 @@ export function createPoller(deps: PollerDeps) {
 
   /**
    * Rewind a stale cursor to the RPC's retained floor — but only when a fresh
-   * `getHealth()` *proves* the cursor sits below it.
+   * `getHealth()` *proves* the cursor sits below it. Returns the floor it moved
+   * the position to, or `null` when it moved nothing (no cursor, an unreadable
+   * window, a position it cannot place, or a spent rewind budget), so callers
+   * can report a *proven* recovery rather than an attempt.
    *
    * The floor is the oldest ledger the RPC still serves, so everything below it
    * is already unrecoverable: keeping the cursor would fail every scan forever,
@@ -1684,10 +1730,10 @@ export function createPoller(deps: PollerDeps) {
   async function rewindFromRetainedFloor(
     target: WatchTarget,
     current: TargetState,
-  ): Promise<void> {
+  ): Promise<number | null> {
     const cursor = current.cursor;
     // Nothing to rewind: a cold start or a rewind already in flight.
-    if (cursor === null) return;
+    if (cursor === null) return null;
 
     let window: LedgerWindow;
     try {
@@ -1699,18 +1745,21 @@ export function createPoller(deps: PollerDeps) {
         `[poller] ${target.source}: stale cursor; could not read the retained window to rewind ` +
           `safely (${errorMessage(err)}); cursor left unchanged`,
       );
-      return;
+      return null;
     }
 
     if (resumeCursorProblem(cursor, window) !== "cursor-before-floor") {
       // Not provably below the floor: keep the cursor. Opaque cursors land here
-      // too, so an unknown cursor shape is forwarded rather than guessed at.
+      // too, so an unknown cursor shape is forwarded rather than guessed at —
+      // but record *why*, because "cannot be placed" and "inside the window"
+      // must not look the same from `/status` or `GET /health`.
+      if (eventCursorLedger(cursor) === null) current.cursorUnreadable = true;
       console.error(
         `[poller] ${target.source} cursor could not be placed below the retained floor; ` +
           `keeping it — delete ${config.cursorFile} to cold-start ` +
           `(no events are skipped until then)`,
       );
-      return;
+      return null;
     }
 
     const attempts = rewindAttempts.get(target.source) ?? 0;
@@ -1719,22 +1768,85 @@ export function createPoller(deps: PollerDeps) {
         `[poller] ${target.source}: cursor is below the retained floor ${window.oldestLedger} ` +
           `and the auto-rewind budget (${MAX_FLOOR_REWINDS}) is spent; operator action required`,
       );
-      return;
+      return null;
     }
 
     const cursorLedger = eventCursorLedger(cursor);
     const missed = cursorLedger === null ? 0 : Math.max(0, window.oldestLedger - cursorLedger);
     rewindAttempts.set(target.source, attempts + 1);
+    const at = now();
     current.cursor = null;
     current.lastEventLedger = null;
     current.rewindFromLedger = window.oldestLedger;
+    // The position becomes a floor walk, so any "could not be read" flag it
+    // carried is spent. The gap itself is what an operator needs, and it is
+    // recorded once per occurrence: after the rewind the position *is* the
+    // floor, which is inside the window, so a second report takes another
+    // restart (or another outage) behind a floor that has moved on again.
+    current.cursorUnreadable = false;
+    current.gapLedgers = missed;
+    current.cursorResetAt = at;
     status.cursorRewinds += 1;
+    status.restartGaps += 1;
+    status.lastRestartGap = {
+      at,
+      source: target.source,
+      cursorLedger: cursorLedger ?? window.oldestLedger,
+      oldestLedger: window.oldestLedger,
+      missedLedgers: missed,
+    };
     markDirty();
     console.warn(
-      `[poller] ${target.source}: cursor is ${missed} ledger(s) below the retained floor; ` +
+      `[poller] ${target.source}: restart gap — cursor at ledger ${cursorLedger} is ` +
+        `${missed} ledger(s) below the retained floor; ` +
         `rewinding to the floor ${window.oldestLedger} ` +
         `(auto-rewind ${attempts + 1}/${MAX_FLOOR_REWINDS})`,
     );
+    return window.oldestLedger;
+  }
+
+  /**
+   * Place one target's resume position against the floor the last successful
+   * scan proved, and recover when it has fallen out of the window.
+   *
+   * This runs *before* the scan, which is the point: the poller already reacts
+   * to an RPC rejection, but a below-floor position that Soroban answers with
+   * an empty page advances nothing, logs nothing and is retried every cycle
+   * forever. The comparison costs one `eventCursorLedger` and no request —
+   * the floor is whatever a successful scan already reported, so there is
+   * nothing to guess and nothing extra to ask for — and it cannot fire for a
+   * position this build cannot read.
+   *
+   * Recovery stays `rewindFromRetainedFloor`: it re-reads `getHealth()` and
+   * refuses to move a cursor it cannot place below the floor.
+   */
+  async function enforceCursorWindow(
+    target: WatchTarget,
+    current: TargetState,
+  ): Promise<void> {
+    const verdict = classifyCursorWindow(current.cursor, status.oldestLedger);
+
+    if (verdict.status === "unreadable") {
+      if (!current.cursorUnreadable) {
+        current.cursorUnreadable = true;
+        console.warn(
+          `[poller] ${current.source}: persisted cursor has no readable ledger ` +
+            `position; leaving it untouched and letting the RPC accept or reject it`,
+        );
+      }
+      return;
+    }
+
+    if (verdict.status === "no-cursor" || verdict.status === "inside") {
+      // A position this build can read, inside the window: whatever could not
+      // be read before is no longer the position this target holds.
+      current.cursorUnreadable = false;
+      return;
+    }
+
+    // `unknown-floor` is not evidence of anything, and `stale` is the gap.
+    if (verdict.status !== "stale") return;
+    await rewindFromRetainedFloor(target, current);
   }
 
   async function runCycle(): Promise<void> {
@@ -1801,6 +1913,11 @@ export function createPoller(deps: PollerDeps) {
         }
 
         try {
+          // Before asking for events, place the resume position against the last
+          // floor a successful scan reported: below it, the events are already
+          // unrecoverable whether or not the RPC says so in an error.
+          await enforceCursorWindow(target, current);
+
           const dedupWindow = dedup.get(target.source) ?? new EventDedupWindow(0);
           const rewinding = current.rewindFromLedger !== null;
           // Read before the scan: the scan is what assigns the new cursor, and
@@ -1942,6 +2059,9 @@ export function createPoller(deps: PollerDeps) {
           // deliberate drops, to avoid replaying a permanent Telegram failure.
           if (scan.cursor && scan.cursor !== current.cursor) {
             current.cursor = scan.cursor;
+            // The RPC accepted the resume position and moved it, so whatever
+            // could not be read locally is no longer the position we hold.
+            current.cursorUnreadable = false;
             markDirty();
             if (delivery.failed > 0 || delivery.skipped > 0) {
               console.warn(

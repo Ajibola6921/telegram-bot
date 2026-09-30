@@ -288,6 +288,8 @@ After a restart:
 2. Confirm the persisted cursor is present.
 3. Confirm polling resumes normally.
 4. Check that counters and last-event ledgers begin advancing again.
+5. Check for a restart gap (see [Restart gaps](#restart-gaps)): a downtime longer
+   than the RPC's retained window shows up there, not as an error.
 
 ### Ephemeral deployment
 

@@ -101,7 +101,7 @@ function cursorPreview(cursor: string | null): string {
   return compact.length <= 24 ? compact : `${compact.slice(0, 23)}…`;
 }
 
-function statusMessage(config: BotConfig, status: PollerStatus, nowMs: number = Date.now()): string {
+export function statusMessage(config: BotConfig, status: PollerStatus, nowMs: number = Date.now()): string {
   const lifecycle = status.stopping
     ? "stopping"
     : status.paused
@@ -158,6 +158,9 @@ function statusMessage(config: BotConfig, status: PollerStatus, nowMs: number = 
   }
   if (status.consecutiveFailures > 0) {
     lines.push(`Consecutive failed cycles: ${status.consecutiveFailures}`);
+  }
+  if (status.restartGaps > 0) {
+    lines.push(`Restart gaps detected since start: ${status.restartGaps}`);
   }
 
   if (status.stopping) {
@@ -234,12 +237,30 @@ export function healthMessage(
           : `  ALERT: stale cursor recovery from ledger ${target.rewindFromLedger}`,
       );
     }
+    if (target.gapLedgers > 0) {
+      lines.push(
+        `  restart gap: ${target.gapLedgers} ledger(s) unrecoverable at the last recovery`,
+      );
+    }
+    if (target.cursorUnreadable) {
+      lines.push("  cursor ledger unreadable: position forwarded unchanged");
+    }
     if (target.hasError) {
       const targetState = status.targets.find((t) => t.source === target.source);
       if (targetState?.lastError) {
         lines.push(`  last error: ${escapeMd(targetState.lastError)}`);
       }
     }
+  }
+
+  if (report.poller.restartGaps > 0) {
+    const gap = report.poller.lastRestartGap;
+    lines.push(
+      escapeMd(
+        `Restart gaps since start: ${report.poller.restartGaps}` +
+          (gap ? ` (last: ${gap.missedLedgers} ledger(s) unrecoverable on ${gap.source})` : ""),
+      ),
+    );
   }
 
   if (report.poller.lastError) {

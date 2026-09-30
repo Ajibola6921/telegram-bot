@@ -572,12 +572,39 @@ The poller now recovers from exactly that case, without guessing:
 - The miss is logged as a bounded ledger count (`cursor is N ledger(s) below the
   retained floor`), never as a raw RPC payload, and `/status` and `GET /health`
   expose `cursorRewinds` plus the per-target `rewindFromLedger` while it lasts.
+- **Detection does not wait for the rejection.** Before it asks for events, every
+  cycle places a resumed cursor against the floor the last successful scan proved,
+  so a position the RPC answers with an empty page instead of a stale error is
+  caught too - that case used to retry the same ledger forever without a line in
+  the logs. One comparison and no extra request, and it can only fire for a
+  position this build can place *strictly* below the floor.
 
 A recovery is observable: `/status` gains a `Cursors rewound to the retained
 floor: N` line once `cursorRewinds > 0`, and `status.json` reports the same
 counter and the active `rewindFromLedger`. The counter is per process, so it
 resets on restart; the position itself is persisted so a restart mid-recovery
 resumes from the same floor.
+
+### What a restart gap reports
+
+A position that is *provably* below the floor is a **restart gap**: the ledgers
+between it and the floor are gone for good. Main's recovery resumes from the
+floor, so the retained window is delivered late rather than dropped — but how
+much was lost, and when, is what an operator needs to see, and it is reported
+once per occurrence rather than once per cycle:
+
+- `/status` adds `restart gap: N ledgers unrecoverable, cursor reset <ago>` for
+  each affected target, and `Restart gaps detected since start: N` when a gap
+  has been seen.
+- `GET /health` adds `restartGaps`, a `lastRestartGap` object (`at`, `source`,
+  `cursorLedger`, `oldestLedger`, `missedLedgers`) and per-target `gapLedgers`,
+  `cursorResetAt` and `cursorUnreadable`.
+- The `/health` command adds the same summary and the per-target gap.
+
+A cursor whose ledger cannot be read out of the opaque token is **not** a gap: it
+is reported as `cursorUnreadable` and forwarded unchanged, because a token shape
+this build does not understand is not evidence that the RPC will reject it. Only
+a position this build can place strictly below the floor is a gap.
 
 ## Decoder compatibility contract
 
@@ -761,10 +788,11 @@ This process is meant to stay up for weeks, so a single failure never ends it:
   to `data/cursor.json.corrupt.<timestamp>` beside the live path, then treated as
   a cold start; the next successful cycle writes a fresh `cursor.json`, and the
   quarantined copy is kept for operators instead of being overwritten.
-- **A valid but RPC-rejected stale cursor** (one below the retained floor) is
-  rewound to that floor in bounded steps: the poller confirms the position
-  against a fresh `getHealth()`, drops the unreachable cursor, rescans from
-  `oldestLedger`, and records the recovery in `/status` and `status.json`. It
+- **A valid but stale cursor** (one below the retained floor) is caught before the
+  scan as well as on the RPC's own rejection, and rewound to that floor in bounded
+  steps: the poller confirms the position against a fresh `getHealth()`, drops the
+  unreachable cursor, rescans from `oldestLedger`, and records the recovery plus the
+  ledgers it lost in `/status`, `status.json` and `GET /health`. It
   never guesses — an opaque cursor, an ahead-of-tip cursor, or a window that
   cannot be read is left untouched and the bounded RPC error is surfaced. After
   `MAX_FLOOR_REWINDS` (3) consecutive rewinds for one contract the poller stops
@@ -948,7 +976,9 @@ npm run healthcheck
 
 The JSON body is operational status only: poller counters, ledgers, truncated
 cursors, whether a target has an error, automatic floor rewinds
-(`poller.cursorRewinds` plus each target's `rewindFromLedger`), and the chain
+(`poller.cursorRewinds` plus each target's `rewindFromLedger`), restart gaps
+(`poller.restartGaps` and `poller.lastRestartGap`, plus each target's `gapLedgers`,
+`cursorResetAt` and `cursorUnreadable`), and the chain
 clock (`poller.chainClockAt` plus `poller.chainClockSkewMs`, the signed difference
 in milliseconds between the bot's clock and the newest chain close time it has
 observed — positive while the bot is ahead). Each target's `cursorStale` boolean

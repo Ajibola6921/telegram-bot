@@ -79,6 +79,20 @@ export interface HealthReport {
     /** Repetitive error lines summarized rather than printed since start. */
     suppressedLogs: number;
     lastError: { at: string; message: string } | null;
+    /** Restart gaps detected since this process started. */
+    restartGaps: number;
+    /**
+     * The most recent resume position that fell below the RPC's retained
+     * window. The events it skipped are unrecoverable; this is what made them
+     * visible. Ledger numbers only — never a token or a remote payload.
+     */
+    lastRestartGap: {
+      at: string;
+      source: string;
+      cursorLedger: number;
+      oldestLedger: number;
+      missedLedgers: number;
+    } | null;
     /**
      * In-memory cursor state that is not on disk yet. False after a successful
      * flush, which is what a shutdown is for.
@@ -93,6 +107,12 @@ export interface HealthReport {
       lastEventLedger: number | null;
       /** Opaque resume cursor; not a secret. Truncated for readability. */
       cursorPreview: string | null;
+      /** Ledgers lost to the retained window at this target's last restart gap. */
+      gapLedgers: number;
+      /** When this target's stale cursor was last rewound, or null. */
+      cursorResetAt: string | null;
+      /** A cursor is persisted but no ledger can be read out of it. */
+      cursorUnreadable: boolean;
       /** Ledger a target is resuming from after a floor rewind, or null. */
       rewindFromLedger: number | null;
       /** RPC rejected this target's cursor as stale; true until a scan succeeds. */
@@ -240,6 +260,16 @@ export function buildHealthReport(
         ? {
             at: new Date(poller.lastError.at).toISOString(),
             message: redactText(poller.lastError.message),
+          }
+        : null,
+      restartGaps: poller.restartGaps ?? 0,
+      lastRestartGap: poller.lastRestartGap
+        ? {
+            at: new Date(poller.lastRestartGap.at).toISOString(),
+            source: poller.lastRestartGap.source,
+            cursorLedger: poller.lastRestartGap.cursorLedger,
+            oldestLedger: poller.lastRestartGap.oldestLedger,
+            missedLedgers: poller.lastRestartGap.missedLedgers,
           }
         : null,
       pendingFlush: poller.pendingFlush === true,

@@ -33,6 +33,7 @@ Do not wire `npm run scan` into automated tests.
 | --- | --- |
 | `tests/fixtures/events.json` | Decoded event cases for `formatEvent` / notifier fakes |
 | `tests/fixtures/cursor-valid.json` | Well-formed `data/cursor.json` shape for restart docs |
+| `tests/fixtures/cursor-stale.json` | Cursor that fell below the RPC's retained window (restart gap) |
 | `tests/fixtures/cursor-corrupt.txt` | Unreadable cursor sample (cold-start path) |
 | `tests/fixtures.test.mjs` | Loads the fixture catalog and asserts notify / skip / boundary behaviour |
 | `tests/format.test.mjs` | Inline event-formatting units (MarkdownV2, USDC, Telegram send failures) |
@@ -95,7 +96,7 @@ Rules:
 | `positive` | Happy-path notification for a known market/squad event | `notify` |
 | `negative` | Malformed / unknown / admin-shaped payload → no chat message | `skip` |
 | `boundary` | Clipping, reserved MarkdownV2 chars, zero/max amounts | `notify` or `skip` |
-| `restart` | Documents cursor resume / corrupt-file cold start (see cursor fixtures) | n/a in format suite |
+| `restart` | Documents cursor resume, restart-gap detection and corrupt-file cold start (see cursor fixtures) | n/a in format suite |
 
 `expect: "notify"` requires a non-null MarkdownV2 string from `formatEvent`.
 `expect: "skip"` requires `null` (or an `unknown` payload that the poller would
@@ -142,6 +143,8 @@ test("resumes", () =>
 | RPC error for one contract | **unchanged** for that target | none that cycle | Fake rejected `readContractEvents`; assert cursor string identical |
 | Ledger-window violation (start ledger or cursor **above** the tip) | **unchanged** | none that cycle | Fake `getHealth` window plus an out-of-window value; assert a bounded `LedgerWindowError` and that no `getEvents` request is sent |
 | Cursor **below** the retained floor (stale) | **unchanged** | none that cycle | Fake `getHealth` window plus a stale cursor; assert the cursor is forwarded and the RPC's bounded stale rejection is surfaced |
+| Cursor below the floor, RPC answers with an **empty page** (no error) | **rewound** to the floor | retained window delivered late | Fake `getHealth` window plus a cursor walk that hands back the same cursor; assert one restart gap is recorded and the walk resumes at the floor |
+| Cursor string with no readable ledger | **unchanged**, flagged `cursorUnreadable` | none that cycle | Pass a non-TOID cursor; assert no gap is recorded and the token is forwarded |
 | Telegram send error | **commits after partial delivery** | counted as failed | Fake `sendMessage` reject; assert cursor advances and no token appears in the Error message |
 | Corrupt cursor file | cold start | n/a | Use `cursor-corrupt.txt` contents |
 | Burst over cap | advances | extras skipped | Cap `MAX_NOTIFICATIONS_PER_CYCLE` in the fake config |
