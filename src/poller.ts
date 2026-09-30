@@ -984,7 +984,7 @@ export async function waitForStartupHealth(
  * instead of sleeping through another backoff step.
  */
 async function sendWithRetry(
-  send: (text: string) => Promise<void>,
+  send: (text: string, previewsEnabled?: boolean) => Promise<void>,
   text: string,
   botToken: string,
   opts?: SendOptions,

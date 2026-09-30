@@ -8,6 +8,10 @@
  *
  * One event, one message, one line of substance. A notification is read on a
  * phone lock screen.
+ *
+ * Link previews are controlled per message: enabled for events with transaction
+ * links (which provide useful context about on-chain activity) and disabled for
+ * commands and status messages to keep the UI clean.
  */
 
 import { redactText } from "../redact.js";

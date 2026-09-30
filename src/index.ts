@@ -166,7 +166,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const server = createRpcServer(config);
+  const server = await createRpcServer(config);
 
   // Bounded retries before announcing readiness: a briefly unavailable RPC
   // (deploy race, Testnet blip) should not fail the whole boot, but a wrong

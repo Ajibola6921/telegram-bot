@@ -134,7 +134,7 @@ test("formatted untrusted event text reaches Telegram as exact MarkdownV2", asyn
       category: reserved,
     },
   };
-  const message = formatEvent(config, event);
+  const formatted = formatEvent(config, event);
   const expectedMessage =
     `🆕 *New claim* \\#7\nCategory: ${expectedEscape(reserved)}\n` +
     "Creator: `GABCD`\n_ledger 42_ \\· _v1_";
