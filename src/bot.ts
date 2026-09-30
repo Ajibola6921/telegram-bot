@@ -127,6 +127,16 @@ export function statusMessage(config: BotConfig, status: PollerStatus, nowMs: nu
     "*Watching*",
   ];
 
+  // Only shown when the queue is holding or has replayed something, so an
+  // ordinary /status is unchanged.
+  if (status.deadLetter && (status.deadLetter.depth > 0 || status.deadLetter.replayed > 0)) {
+    lines.push(
+      `Parked sends: ${status.deadLetter.depth} waiting \u00b7 ` +
+        `${status.deadLetter.replayed} replayed \u00b7 ${status.deadLetter.dropped} dropped`,
+      "",
+    );
+  }
+
   // Only shown after an automatic recovery, so an ordinary /status is unchanged.
   if (status.cursorRewinds > 0) {
     lines.push(

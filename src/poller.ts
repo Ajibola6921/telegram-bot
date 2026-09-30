@@ -64,6 +64,12 @@ import { appendAuditFile, auditEntry, createAuditLog, type AuditLog } from "./au
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, type BotConfig } from "./config.js";
 import { EventDedupWindow } from "./dedup.js";
 import {
+  createDeadLetterQueue,
+  DEAD_LETTER_MAX_ATTEMPTS,
+  DEAD_LETTER_MAX_ENTRIES,
+  type DeadLetterStats,
+} from "./deadLetter.js";
+import {
   acquireInstanceLock,
   InstanceLockError,
   type InstanceLockHandle,
@@ -1125,6 +1131,26 @@ export function createPoller(deps: PollerDeps) {
     targets.map((t) => [t.source, new EventDedupWindow(config.dedupWindow)]),
   );
 
+  // The queue is opt-in by config, like `shutdownTimeoutMs`: a hand-built
+  // config that predates the setting (tests, tooling) must keep main's
+  // drop-and-count behaviour, with no file access at all.
+  const deadLetterEnabled =
+    typeof config.deadLetterFile === "string" && config.deadLetterFile.length > 0;
+  const deadLetter = createDeadLetterQueue({
+    filePath: deadLetterEnabled ? (config.deadLetterFile as string) : null,
+    maxEntries: config.deadLetterMax ?? DEAD_LETTER_MAX_ENTRIES,
+    maxAttempts: config.deadLetterMaxAttempts ?? DEAD_LETTER_MAX_ATTEMPTS,
+    // A Telegram error embeds the token in its request URL, and the queue is
+    // the last place it belongs.
+    secrets: [config.botToken],
+    now,
+  });
+
+  /** Mirror the queue's counters into the status this poller reports. */
+  function refreshDeadLetterStatus(): void {
+    status.deadLetter = deadLetter.stats();
+  }
+
   const status: PollerStatus = {
     running: false,
     paused: false,
@@ -1141,6 +1167,7 @@ export function createPoller(deps: PollerDeps) {
     notificationsFailed: 0,
     eventsSkipped: 0,
     notificationsDropped: 0,
+    deadLetter: { depth: 0, enqueued: 0, replayed: 0, dropped: 0 },
     eventsDeduplicated: 0,
     cursorRewinds: 0,
     restartGaps: 0,
@@ -1664,7 +1691,9 @@ export function createPoller(deps: PollerDeps) {
         sentThisCycle += 1;
         consecutiveSendFailures = 0;
       } catch (err) {
-        // All retries exhausted; drop the message but continue processing others.
+        // All retries exhausted. The event still counts as failed and the cursor
+        // still advances — but the message is parked instead of dropped, so a
+        // transient Telegram outage costs a delay rather than the notification.
         status.notificationsFailed += 1;
         metrics?.notificationsFailed.inc();
         failed += 1;
@@ -1893,6 +1922,11 @@ export function createPoller(deps: PollerDeps) {
 
     let anyOk = false;
     let cycleFailures = 0;
+
+    // Drain parked sends before this cycle's events, so a recovered channel
+    // catches up in order. Budgeted like the burst below: one recovery must
+    // not flood the chat.
+    await flushDeadLetter();
 
     try {
       // Pace each contract independently: scan them sequentially but do not let
@@ -2271,6 +2305,9 @@ export function createPoller(deps: PollerDeps) {
       }
 
       await loadCursors();
+      // Parked sends from the previous run are part of this run's work.
+      await deadLetter.load();
+      refreshDeadLetterStatus();
       stopped = false;
       paused = false;
       status.paused = false;

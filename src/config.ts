@@ -157,6 +157,15 @@ export interface BotConfig extends StellarConfig {
    * across overlapping pages, resumed cursors, and restarts. `0` disables it.
    */
   dedupWindow: number;
+  /**
+   * Bounded on-disk queue for sends that exhausted their in-cycle
+   * retries. Empty disables the queue (see src/deadLetter.ts).
+   */
+  deadLetterFile: string;
+  /** Parked sends retained; the oldest is dropped once the queue is full. */
+  deadLetterMax: number;
+  /** Replay attempts before a parked send is dropped as poison. */
+  deadLetterMaxAttempts: number;
   /** Loopback host for the local HTTP health endpoint. */
   healthHost: string;
   /** TCP port for the health endpoint. `0` disables the listener. */
@@ -224,6 +233,9 @@ const DEFAULTS = {
   csvOutputFile: "./data/scanner_output.csv",
   auditFile: "./data/audit.jsonl",
   dedupWindow: 256,
+  deadLetterFile: "./data/dead-letter.json",
+  deadLetterMax: 100,
+  deadLetterMaxAttempts: 10,
   healthHost: "127.0.0.1",
   healthPort: 8787,
   // 3Ã— default poll interval â€” one missed cycle is fine; three is not.
@@ -613,6 +625,17 @@ export function loadConfig(): BotConfig {
     auditFile: path.resolve(process.cwd(), read("AUDIT_FILE") ?? DEFAULTS.auditFile),
     // 0 is the documented escape hatch: no redelivery suppression.
     dedupWindow: c.int("EVENT_DEDUP_WINDOW", DEFAULTS.dedupWindow, 0),
+    // Resolved like the cursor file: relative paths anchor to the cwd.
+    deadLetterFile: path.resolve(
+      process.cwd(),
+      c.get("DEAD_LETTER_FILE") ?? DEFAULTS.deadLetterFile,
+    ),
+    deadLetterMax: c.int("DEAD_LETTER_MAX", DEFAULTS.deadLetterMax, 1),
+    deadLetterMaxAttempts: c.int(
+      "DEAD_LETTER_MAX_ATTEMPTS",
+      DEFAULTS.deadLetterMaxAttempts,
+      1,
+    ),
     healthHost: c.host("HEALTH_HOST", DEFAULTS.healthHost),
     // Port 0 is the explicit disable switch (min 0).
     healthPort: c.int("HEALTH_PORT", defaultHealthPort(), 0),

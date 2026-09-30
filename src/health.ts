@@ -77,6 +77,11 @@ export interface HealthReport {
     notificationsDropped: number;
     /** Cursors automatically rewound to the RPC's retained floor this run. */
     cursorRewinds: number;
+    /**
+     * Bounded queue of sends that exhausted their retries and are waiting to
+     * be replayed. Counts only: no message text, no destination.
+     */
+    deadLetter: { depth: number; enqueued: number; replayed: number; dropped: number };
     consecutiveFailures: number;
     /** Repetitive error lines summarized rather than printed since start. */
     suppressedLogs: number;
@@ -256,6 +261,12 @@ export function buildHealthReport(
       eventsDeduplicated: poller.eventsDeduplicated ?? 0,
       notificationsDropped: poller.notificationsDropped ?? 0,
       cursorRewinds: poller.cursorRewinds ?? 0,
+      deadLetter: {
+        depth: poller.deadLetter?.depth ?? 0,
+        enqueued: poller.deadLetter?.enqueued ?? 0,
+        replayed: poller.deadLetter?.replayed ?? 0,
+        dropped: poller.deadLetter?.dropped ?? 0,
+      },
       consecutiveFailures: poller.consecutiveFailures,
       suppressedLogs: poller.suppressedLogs ?? 0,
       lastError: poller.lastError

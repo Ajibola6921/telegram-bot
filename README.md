@@ -776,11 +776,15 @@ This process is meant to stay up for weeks, so a single failure never ends it:
 - **A partial notification batch** commits the opaque RPC cursor after the
   returned page has been processed. Unknown events, events beyond
   `MAX_NOTIFICATIONS_PER_CYCLE`, and sends that exhaust three bounded retries
-  are counted as skipped or failed and are not replayed. Holding the cursor
-  back would turn a revoked token or removed chat into an infinite replay, and
-  recovery would flood the channel. A failed send is isolated to that routed
-  chat and event; other events continue. Notifications are lossy on purpose —
-  the chain is the record; the poller logs the sent/failed/skipped commit decision.
+  are counted as skipped or failed. Holding the cursor back would turn a
+  revoked token or removed chat into an infinite replay, so the cursor always
+  advances — but a send that exhausts its retries is parked in a bounded local
+  queue and replayed on a later cycle once Telegram recovers, so a rate limit or
+  a short outage costs a delay rather than the message. See
+  [Dead-letter queue](#dead-letter-queue). A failed send is isolated to that
+  routed chat and event; other events continue. Skips are lossy on purpose —
+  the chain is the record; the poller logs the sent/failed/skipped/parked
+  commit decision.
   A rejected inline keyboard (or a malformed MarkdownV2 payload) fails the same
   way as any other send. Events without a usable transaction hash are still
   sent, just without the explorer button.
@@ -845,6 +849,41 @@ This process is meant to stay up for weeks, so a single failure never ends it:
   most `SHUTDOWN_TIMEOUT_MS` for the cycle in progress, and flushes any cursor
   state that is still only in memory — see
   [Graceful shutdown](#graceful-shutdown).
+
+### Dead-letter queue
+
+A send that fails every bounded retry is parked in `data/dead-letter.json`
+(`DEAD_LETTER_FILE`) instead of being dropped. The two failure modes are
+different: a rate limit or a short Telegram outage is a delay, while a revoked
+token is permanent, and the send site cannot tell them apart. Parked messages are
+replayed oldest-first at the start of a later cycle, under the same per-cycle
+budget as a normal burst, and the file is bounded on every axis:
+
+| Bound | Setting | Default | Behaviour when reached |
+| --- | --- | --- | --- |
+| Depth | `DEAD_LETTER_MAX` | `100` | the oldest parked send is dropped |
+| Attempts | `DEAD_LETTER_MAX_ATTEMPTS` | `10` | the entry is dropped as poison |
+| Message body | — | 4,000 chars | the stored text is truncated |
+| Recorded error | — | 200 chars | redacted (bot token), then truncated |
+
+Identity is the event, not the attempt: the same event failing twice is one
+entry with two attempts, so a failing cycle cannot fill the queue with
+duplicates. Only the already-formatted message and short operational metadata
+(source, ledger, event name, redacted error) are stored — never a signing key —
+and the file is written write-then-rename, so a crash cannot corrupt it.
+
+Two things it deliberately does not do:
+
+- **It never holds the cursor back.** The cursor advances exactly as it did
+  before, because a permanently broken destination must not stop the poller or
+  replay the chain forever.
+- **It never replays what a shutdown dropped.** A message that was never
+  attempted at `SIGTERM` is counted as dropped and left to the chain, so a
+  restart cannot resurrect a stale backlog into the channel.
+
+`/status` and `GET /health` report the queue's depth, replays and drops. Omitting
+`DEAD_LETTER_FILE` disables the queue entirely, and the poller then behaves
+exactly as it did before the queue existed.
 
 ## Graceful shutdown
 
@@ -1093,6 +1132,8 @@ src/
 tests/
   format.test.mjs          notification formatting (incl. deterministic fuzz)
   audit.test.mjs           redaction, entries, persistence, report rendering
+  deadLetter.test.mjs      queue bounds, poison entries, redacted stored errors
+  poller-dlq.test.mjs      parking, replay after recovery, restart, disabled path
   replay.test.mjs          cursor-range replay: dry-run, send, clamp, security, cursor-safety
 ```
 
