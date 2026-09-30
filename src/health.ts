@@ -19,6 +19,8 @@ import { redactText } from "./redact.js";
 export interface HealthDeps {
   config: BotConfig;
   status: () => PollerStatus;
+  /** Bounded redacted log ring; when absent or disabled, /health/diag 404s. */
+  logs?: LogCapture;
   /** Optional clock for deterministic tests. */
   now?: () => number;
   /**
@@ -381,7 +383,7 @@ function sendJson(
  * useful for unit tests and one-shot CLI runs that must not bind a port.
  */
 export function startHealthServer(deps: HealthDeps): HealthServer {
-  const { config, status } = deps;
+  const { config, status, logs } = deps;
   const now = deps.now ?? Date.now;
   const provenance = deps.provenance ?? configProvenance;
 
@@ -451,7 +453,10 @@ export function startHealthServer(deps: HealthDeps): HealthServer {
   const address = server.address() as AddressInfo | null;
   const port = address?.port ?? config.healthPort;
   const url = `http://${config.healthHost}:${port}`;
-  console.log(`[health] listening on ${url} (GET /health, GET /health/live)`);
+  console.log(
+    `[health] listening on ${url} (GET /health, GET /health/live` +
+      `${logs && logs.capacity() > 0 ? ", GET /health/diag" : ""})`,
+  );
 
   return {
     url,

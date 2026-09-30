@@ -111,6 +111,7 @@ An operator pause is reported as healthy by `/health` with `poller.paused=true`.
 ### Symptoms
 
 * `/status` reports a recent RPC error.
+* `/export` shows the per-target `[poller] … scan failed` lines leading up to it.
 * One contract stops advancing while the other continues.
 * Notifications from one contract are missing.
 
@@ -132,6 +133,8 @@ Do not manually advance the cursor to skip an RPC failure.
 * Event scanning continues but sends fail.
 * `/status` shows send errors or an increasing scan/send difference.
 * The bot was removed from the chat or its token was revoked.
+* `/export` shows the bounded send-retry warnings and the final
+  `send failed … after retries` line, with the token itself always masked.
 
 ### Recovery
 

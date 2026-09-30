@@ -505,6 +505,19 @@ export function createBot(deps: BotDeps): Bot {
   registerCommandHandlers(bot, deps);
   registerCallbackHandlers(bot, deps);
 
+  bot.command("export", async (ctx) => {
+    if (!logs || logs.capacity() === 0) {
+      await ctx.reply("Log export is disabled (LOG_BUFFER_LINES=0).");
+      return;
+    }
+    // Plain text, no parse mode: the content is redacted but untrusted, and
+    // MarkdownV2 would make any escaping slip a parsing error instead of a
+    // cosmetic wart.
+    await ctx.reply(renderLogExport(config, status(), logs), {
+      link_preview_options: { is_disabled: true },
+    });
+  });
+
   // grammy rethrows handler errors by default, which would take the process
   // with it. Keep Telegram/RPC error text bounded and redact known secrets.
   bot.catch((err) => {

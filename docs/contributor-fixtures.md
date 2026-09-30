@@ -88,6 +88,9 @@ Rules:
    test cannot accidentally hit Testnet.
 4. **Never put `BOT_TOKEN`, payment proofs, or private keys in fixtures or
    assertions.** Logs and error messages under test must stay free of those.
+5. **Log-export tests assert on a fake token** (e.g. `0000000000:SECRET-TOKEN-DO-NOT-LEAK`)
+   and assert the redaction *removed* it — never verify redaction by pasting a
+   real-looking credential and checking it survived anywhere.
 
 ### Case kinds (what to cover)
 
@@ -188,6 +191,21 @@ without replay, bounded redacted logs, and the version-1 cursor file shape.
    catalog runner needs a new expect mode.
 4. If behaviour changes ops (env vars, cursor shape), update this guide and the
    README "Development checks" link in the same PR.
+
+## Log capture and the `/export` command
+
+The bot keeps a bounded in-memory ring of its own redacted console lines
+(`LOG_BUFFER_LINES`, default 500, `0` disables) and renders it for operators via
+the `/export` command and `GET /health/diag`. Invariants the tests hold in
+place (`tests/logexport.test.mjs`):
+
+- Redaction happens **on capture**, before storage — a secret must never sit in
+  the buffer, and the rendered export is redacted again as a final net.
+- The ring evicts the oldest line when full; there is no unbounded retention.
+- The export is plain text with no parse mode, so log content cannot inject
+  MarkdownV2 entities.
+- Capture is in-memory only: a restart starts with an empty ring, and nothing
+  is written to `data/` or anywhere else.
 
 ## Out of scope for fixtures
 
