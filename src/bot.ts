@@ -13,7 +13,13 @@ import { Bot, type Context, type CommandContext } from "grammy";
 import type { UserFromGetMe } from "grammy/types";
 import { performance } from "node:perf_hooks";
 
-import { escapeMd, previewMessage, safeErrorMessage, type ExplorerKeyboard } from "./notifications/format.js";
+import {
+  escapeMd,
+  splitTelegramMessage,
+  previewMessage,
+  safeErrorMessage,
+  type ExplorerKeyboard,
+} from "./notifications/format.js";
 import { formatFeatureFlags } from "./notifications/featureFlags.js";
 export { previewMessage } from "./notifications/format.js";
 import { formatProvenanceSummary, networkLabel, type BotConfig } from "./config.js";
@@ -392,6 +398,22 @@ function isOperator(ctx: Context, config: BotConfig): boolean {
 /** How many recent audit lines `/audit` renders. A chat message is not a file. */
 const AUDIT_TAIL = 10;
 
+/**
+ * Reply with MarkdownV2, splitting when the payload exceeds Telegram's
+ * 4096-character `sendMessage` limit. `/help` grows with the command list
+ * and `/status` with the watched targets, so either can cross it; the chunks
+ * are sent in order.
+ */
+async function replyMarkdown(
+  ctx: CommandContext<Context>,
+  text: string,
+  options: typeof TELEGRAM_OPTIONS = TELEGRAM_OPTIONS,
+): Promise<void> {
+  for (const part of splitTelegramMessage(text)) {
+    await ctx.reply(part, options);
+  }
+}
+
 /** Register command handlers on a grammy-compatible bot (also useful in tests). */
 export function registerCommandHandlers(
   bot: Bot | { command: (name: string, handler: (ctx: Context) => Promise<void>) => void },
@@ -403,11 +425,11 @@ export function registerCommandHandlers(
 
   const handlers: Record<typeof COMMANDS[number]["command"], (ctx: CommandContext<Context>) => Promise<void>> = {
     start: async (ctx) => {
-      await ctx.reply(helpMessage(config), TELEGRAM_OPTIONS);
+      await replyMarkdown(ctx, helpMessage(config));
     },
 
     help: async (ctx) => {
-      await ctx.reply(helpMessage(config), TELEGRAM_OPTIONS);
+      await replyMarkdown(ctx, helpMessage(config));
     },
 
     status: async (ctx) => {
@@ -611,10 +633,11 @@ function eventRefLabel(eventRef: SendExtra["eventRef"]): string {
  * `parse_mode`, so it cannot fail the same way. Every other failure —
  * network, rate limit, auth, unknown chats, or a failed plain-text retry —
  * propagates unchanged, preserving the poller's existing error/cursor
- * accounting. At most two `sendMessage` calls per notification, never a loop.
+ * accounting. An oversized payload is split into chunks and an
+ * unspecified one into a single call, so the MarkdownV2-to-plain-text
+ * retry happens at most once per chunk, never in a loop.
  */
-export function createNotifier(bot: Bot, config: BotConfig) {
-  return async (text: string, source?: ContractSource, extra?: SendExtra): Promise<void> => {
+export function createNotifier(bot: Bot, config: BotConfig) {  return async (text: string, source?: ContractSource, extra?: SendExtra): Promise<void> => {
     const chatId = source === "market"
       ? config.marketChatId ?? config.chatId
       : source === "squad"
