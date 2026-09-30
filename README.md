@@ -523,6 +523,12 @@ somewhere else.
 This is suppression, not backfilling. A dropped duplicate does **not** hold the
 cursor back — the chain remains the record and the walk still advances.
 
+The poller exposes **empty-page telemetry** for this: cumulative and last-cycle
+counts of empty `getEvents` pages appear in `/status` and in each scan log line
+(`N page(s) (M empty)`). High empty-page ratios are expected on quiet contracts;
+a sudden drop to zero pages, or `truncated` without progress, is the signal to
+investigate RPC or `EVENT_MAX_PAGES`.
+
 Events are also not a source of truth for current state — a claim's stakes and
 status come from the contract's own getters. This bot is a timeline, not an
 index.

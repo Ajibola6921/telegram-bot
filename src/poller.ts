@@ -189,6 +189,14 @@ export interface PollerStatus {
   notificationsFailed: number;
   /** Never attempted (unknown, malformed or over the per-cycle cap). */
   eventsSkipped: number;
+  /** Cumulative empty getEvents pages across all successful target scans. */
+  emptyPages: number;
+  /** Cumulative pages walked across all successful target scans. */
+  pagesScanned: number;
+  /** Empty pages in the most recent completed cycle (all targets). */
+  lastCycleEmptyPages: number;
+  /** Pages walked in the most recent completed cycle (all targets). */
+  lastCyclePages: number;
   /** Not attempted because a graceful shutdown started first. */
   notificationsDropped: number;
   /** Events suppressed because they had already been processed (dedup). */
@@ -1166,6 +1174,10 @@ export function createPoller(deps: PollerDeps) {
     notificationsSent: 0,
     notificationsFailed: 0,
     eventsSkipped: 0,
+    emptyPages: 0,
+    pagesScanned: 0,
+    lastCycleEmptyPages: 0,
+    lastCyclePages: 0,
     notificationsDropped: 0,
     deadLetter: { depth: 0, enqueued: 0, replayed: 0, dropped: 0 },
     eventsDeduplicated: 0,
@@ -1959,6 +1971,8 @@ for (const event of knownEvents) {
     }
 
     let anyOk = false;
+    let cyclePages = 0;
+    let cycleEmptyPages = 0;
     let cycleFailures = 0;
 
     // Drain parked sends before this cycle's events, so a recovered channel
@@ -2027,6 +2041,11 @@ for (const event of knownEvents) {
           current.consecutiveFailures = 0;
           current.nextEligibleAt = null;
           anyOk = true;
+
+          cyclePages += scan.pages;
+          cycleEmptyPages += scan.emptyPages;
+          status.pagesScanned += scan.pages;
+          status.emptyPages += scan.emptyPages;
 
           if (previousFailed) {
             audit.record(
@@ -2118,7 +2137,18 @@ for (const event of knownEvents) {
             const skippedText = delivery.skipped > 0 ? ` (${delivery.skipped} skipped)` : "";
             console.log(
               `[poller] ${target.source}: ${scan.events.length} event(s) ` +
-                `up to ledger ${scan.lastEventLedger} in ${scan.pages} page(s)${skippedText}`,
+                `up to ledger ${scan.lastEventLedger} in ${scan.pages} page(s)` +
+                (scan.emptyPages > 0 ? ` (${scan.emptyPages} empty)` : "") +
+                skippedText,
+            );
+          } else {
+            // Always surface page telemetry: empty pages are the Soroban
+            // norm, and silence on a zero-event walk hid whether the scanner
+            // kept walking at all.
+            console.log(
+              `[poller] ${target.source}: no events in ${scan.pages} page(s) ` +
+                `(${scan.emptyPages} empty)` +
+                (scan.truncated ? " [truncated]" : ""),
             );
           }
 

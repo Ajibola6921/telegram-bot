@@ -128,6 +128,10 @@ export function statusMessage(config: BotConfig, status: PollerStatus, nowMs: nu
       (status.notificationsDropped
         ? ` · dropped during shutdown ${status.notificationsDropped}`
         : ""),
+    `RPC pages: ${status.pagesScanned} total · ${status.emptyPages} empty` +
+      (status.lastCyclePages > 0
+        ? ` · last cycle ${status.lastCycleEmptyPages}/${status.lastCyclePages} empty`
+        : ""),
     `Feature flags: ${escapeMd(formatFeatureFlags(config.featureFlags))}`,
     "",
     "*Watching*",

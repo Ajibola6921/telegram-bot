@@ -268,6 +268,7 @@ export async function paginatedGetEvents(
   }
 
   const firstStartLedger = startLedger ?? window.oldestLedger;
+  let emptyPages = 0;
 
   for (;;) {
     if (pages >= maxPages) {
@@ -284,6 +285,8 @@ export async function paginatedGetEvents(
         : server.getEvents({ filters, startLedger: firstStartLedger, limit }),
     );
 
+    if (response.events.length === 0) emptyPages += 1;
+    latestLedger = response.latestLedger;
     const rawEvents = Array.isArray(response?.events) ? response.events : [];
     // Drop anything an earlier page (or an earlier cycle) already produced.
     // Order is preserved: the first occurrence wins, matching the RPC's own
@@ -317,6 +320,7 @@ export async function paginatedGetEvents(
     oldestLedger,
     truncated,
     pages,
+    emptyPages,
     duplicates,
     seenEventIds: dedup.toJSON(),
     startLedger,
@@ -733,7 +737,7 @@ async function main(): Promise<void> {
     const counts = eventHistogram(scan.events);
 
     console.log(
-      `pages=${scan.pages} events=${scan.events.length} duplicates=${scan.duplicates} ` +
+      `pages=${scan.pages} emptyPages=${scan.emptyPages} events=${scan.events.length} duplicates=${scan.duplicates} ` +
         `truncated=${scan.truncated} lastEventLedger=${scan.lastEventLedger} cursor=${scan.cursor} ` +
         `start=${scan.startLedger ?? "cursor"}${scan.startClamped ? " (clamped)" : ""}`,
     );
