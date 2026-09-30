@@ -47,6 +47,7 @@ import {
   clampStartLedger,
   createRpcServer,
   LedgerWindowError,
+  validateContractId,
   validateLedgerWindow,
   type LedgerWindow,
 } from "./client.js";
