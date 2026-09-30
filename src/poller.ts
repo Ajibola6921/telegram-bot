@@ -1719,6 +1719,44 @@ export function createPoller(deps: PollerDeps) {
 
     return { sent: sentThisCycle, failed, skipped };
   }
+  return true;
+});
+
+if (config.digestMode) {
+  const digestText = formatDigest(knownEvents);
+  if (!digestText) return;
+  try {
+    await send(digestText);
+    status.notificationsSent += 1;
+  } catch (err) {
+    status.notificationsFailed += 1;
+    console.error(`[poller] digest send failed: ${errMessage(err)}`);
+  }
+  return;
+}
+
+let sentThisCycle = 0;
+for (const event of knownEvents) {
+  const text = formatEvent(config, event);
+  if (text === null) {
+    status.eventsSkipped += 1;
+    continue;
+  }
+  if (sentThisCycle >= config.maxNotificationsPerCycle) {
+    status.eventsSkipped += 1;
+    continue;
+  }
+  try {
+    await send(text);
+    status.notificationsSent += 1;
+    sentThisCycle += 1;
+  } catch (err) {
+    status.notificationsFailed += 1;
+    console.error(`[poller] send failed: ${errMessage(err)}`);
+  }
+  if (sentThisCycle < config.maxNotificationsPerCycle) await sleep(SEND_SPACING_MS);
+}
+}
 
       // Pace sends to stay under Telegram's ~20 messages/minute limit.
       // interSendDelayMs is configurable via INTER_SEND_DELAY_MS.
