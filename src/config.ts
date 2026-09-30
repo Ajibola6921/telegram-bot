@@ -32,6 +32,7 @@
 
 import { createRequire } from "node:module";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { config as loadDotenv, type DotenvConfigOptions } from "dotenv";
 
@@ -982,4 +983,34 @@ export function formatProvenanceSummary(provenance: ConfigProvenance): string {
     `profile=${provenance.profile ?? "none"} env-file=${file} ${counts.join(" ")} ` +
     `secret-keys=${secrets}/${provenance.entries.length}`
   );
+}
+
+/**
+ * Generates a deterministic SBOM-friendly hash of the current configuration.
+ *
+ * This function creates a SHA-256 hash of the non-sensitive configuration
+ * values. It is used to generate Software Bill of Materials (SBOM) metadata
+ * for the bot image, ensuring the read-only Mimir notifier remains reliable,
+ * understandable, and safe during long-running Stellar and Telegram failures.
+ *
+ * Sensitive fields (botToken, chatId) are excluded to prevent leakage.
+ *
+ * @param config - The loaded BotConfig instance.
+ * @returns A hex-encoded SHA-256 hash string representing the configuration state.
+ */
+export function generateConfigHash(config: BotConfig): string {
+  const safeConfig = {
+    marketContractId: config.marketContractId,
+    squadContractId: config.squadContractId,
+    rpcUrl: config.rpcUrl,
+    horizonUrl: config.horizonUrl,
+    networkPassphrase: config.networkPassphrase,
+    pollIntervalMs: config.pollIntervalMs,
+    startLookbackLedgers: config.startLookbackLedgers,
+    cursorFile: config.cursorFile,
+    maxNotificationsPerCycle: config.maxNotificationsPerCycle,
+  };
+
+  const serialized = JSON.stringify(safeConfig, Object.keys(safeConfig).sort());
+  return createHash("sha256").update(serialized).digest("hex");
 }

@@ -228,6 +228,8 @@ export interface PollerStatus {
    */
   suppressedLogs: number;
   targets: TargetState[];
+  /** SHA-256 digest of the SBOM generated for this deployment image. */
+  sbomDigest: string | null;
   /** RPC circuit breaker state */
   circuitBreaker: {
     open: boolean;
@@ -1193,6 +1195,7 @@ export function createPoller(deps: PollerDeps) {
     lastFlushAt: null,
     suppressedLogs: 0,
     targets: [],
+    sbomDigest: null,
     circuitBreaker: {
       open: false,
       openedAt: null,
@@ -2398,6 +2401,14 @@ for (const event of knownEvents) {
       await persistStatus();
       await flushAudit();
       void loop();
+    },
+
+    /**
+     * Attach the SBOM digest for operational reporting.
+     * This is typically set once at startup by the deployment wrapper.
+     */
+    setSbomDigest(digest: string): void {
+      status.sbomDigest = digest;
     },
 
     pause(): PollerPauseResult {
