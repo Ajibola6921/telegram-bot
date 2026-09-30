@@ -180,6 +180,20 @@ async function main(): Promise<void> {
       `ledgers ${health.oldestLedger}..${health.latestLedger}`,
   );
 
+  // Verify that the RPC's network passphrase matches the configured value.
+  // This is a safety-critical check: a mismatch indicates either the RPC is
+  // pointed at the wrong network, or the configuration is wrong. Fail fast
+  // rather than silently emitting notifications on the wrong network.
+  try {
+    await validateNetworkPassphrase(server, config);
+    console.log(`[boot] network passphrase verified`);
+  } catch (err) {
+    console.error(
+      `[fatal] network passphrase verification failed: ${safeErrorMessage(err)}`,
+    );
+    process.exit(1);
+  }
+
   // The bot needs the poller's status and the poller needs the bot's send path,
   // so one edge of the cycle is late-bound. This one, because it is the only
   // one that is a single function reference.

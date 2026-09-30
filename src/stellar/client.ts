@@ -151,6 +151,27 @@ export type LedgerWindowProblem =
   | "start-after-tip"
   | "cursor-after-tip";
 
+/** Why the RPC network passphrase cannot be verified. */
+export type NetworkPassphraseProblem = "mismatch" | "missing" | "malformed";
+
+/**
+ * Raised when the RPC's reported network passphrase does not match the
+ * configured value. This is a safety-critical misconfiguration: either the
+ * RPC is pointed at the wrong network, or the configuration itself is wrong.
+ *
+ * The error message is bounded and never contains the actual passphrases,
+ * so it can be surfaced in logs and status output without leaking secrets.
+ */
+export class NetworkPassphraseMismatchError extends Error {
+  readonly problem: NetworkPassphraseProblem;
+
+  constructor(problem: NetworkPassphraseProblem, message: string) {
+    super(message);
+    this.name = "NetworkPassphraseMismatchError";
+    this.problem = problem;
+  }
+}
+
 /**
  * Raised for a ledger-window bound that is invalid before any request is sent.
  *
